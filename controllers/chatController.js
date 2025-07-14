@@ -1,117 +1,58 @@
 const { GoogleGenerativeAI } = require('@google/generative-ai');
-const gTTS = require('node-gtts');
-const path = require('path');
-const { v4 } = require('uuid');
-const fs = require('fs');
 const admin = require('../config/firebase');
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 const axios = require('axios');
 const YT_API_KEY = process.env.YT_API_KEY;
-const CHANNEL_ID = "UC-QLxQ7cFp-3CFnSZO6oXXw";
 
 const db = admin.firestore();
-const tts = gTTS('en');
-
-
-
-const speakText = async (req, res) => {
-  try {
-    const { text } = req.body;
-    if (!text) return res.status(400).json({ error: 'Text is required' });
-
-    const filename = `${v4()}.mp3`;
-    const filepath = path.join('temp', filename);
-
-    tts.save(filepath, text, async (err) => {
-      if (err) {
-        return res.status(500).json({ error: 'TTS generation failed', details: err.message });
-      }
-
-      setTimeout(() => {
-        if (!fs.existsSync(filepath)) {
-          return res.status(500).json({ error: 'Audio file not found after save' });
-        }
-
-        res.setHeader('Content-Type', 'audio/mpeg');
-        const stream = fs.createReadStream(filepath);
-        stream.pipe(res);
-        stream.on('close', () => fs.unlinkSync(filepath)); // Clean up
-      }, 500);
-    });
-  } catch (err) {
-    res.status(500).json({ error: 'Internal server error', details: err.message });
-  }
-};
-
 
 async function fetchYouTubeVideos(query) {
-  const searchTerms = [query];
   const seen = new Set();
   const results = [];
 
-  for (const term of searchTerms) {
-    try {
-      const res = await axios.get('https://www.googleapis.com/youtube/v3/search', {
-        params: {
-          key: YT_API_KEY,
-          channelId: CHANNEL_ID,
-          q: term,
-          part: 'snippet',
-          maxResults: 3,
-          type: 'video',
-          order: 'relevance',
-          safeSearch: 'moderate',
-        },
-      });
+  const enhancedQuery = `${query} mental health therapy by doctor psychiatrist OR psychologist`;
 
-      console.log(`YouTube search for "${term}" returned ${res.data.items.length} results`);
+  try {
+    const videoRes = await axios.get('https://www.googleapis.com/youtube/v3/search', {
+      params: {
+        key: YT_API_KEY,
+        q: enhancedQuery,
+        part: 'snippet',
+        maxResults: 2,
+        type: 'video',
+        order: 'relevance',
+        safeSearch: 'strict',
+      },
+    });
 
-      for (const item of res.data.items) {
-        const videoId = item.id.videoId;
-        if (item.snippet.channelId === CHANNEL_ID && !seen.has(videoId)) {
-          seen.add(videoId);
-          results.push({
-            type: 'video',
-            title: item.snippet.title,
-            url: `https://www.youtube.com/watch?v=${videoId}`,
-            thumbnail: item.snippet.thumbnails.default.url,
-          });
-        }
-      }
+    console.log(`YouTube video search for "${enhancedQuery}" returned ${videoRes.data.items.length} results`);
 
-      // 🔗 Fetch a related playlist
-      const playlistRes = await axios.get('https://www.googleapis.com/youtube/v3/search', {
-        params: {
-          key: YT_API_KEY,
-          channelId: CHANNEL_ID,
-          q: term,
-          part: 'snippet',
-          maxResults: 1,
-          type: 'playlist',
-          order: 'relevance',
-          safeSearch: 'moderate',
-        },
-      });
+    for (const item of videoRes.data.items) {
+      const videoId = item.id.videoId;
+      const title = item.snippet.title.toLowerCase();
+      const description = item.snippet.description.toLowerCase();
 
-      if (playlistRes.data.items[0].snippet.channelId === CHANNEL_ID && playlistRes.data.items.length > 0) {
-        const playlist = playlistRes.data.items[0];
+      const isRelevant =
+        /(doctor|psychologist|psychiatrist|mental health|therapy|counselor)/.test(title) ||
+        /(doctor|psychologist|psychiatrist|mental health|therapy|counselor)/.test(description);
+
+      if (!seen.has(videoId) && isRelevant) {
+        seen.add(videoId);
         results.push({
-          type: 'playlist',
-          title: playlist.snippet.title,
-          url: `https://www.youtube.com/playlist?list=${playlist.id.playlistId}`,
-          thumbnail: playlist.snippet.thumbnails.default.url,
+          type: 'video',
+          title: item.snippet.title,
+          url: `https://www.youtube.com/watch?v=${videoId}`,
+          thumbnail: item.snippet.thumbnails?.medium?.url || item.snippet.thumbnails?.default?.url,
         });
       }
-
-      return results;
-    } catch (err) {
-      console.error(`YouTube search failed for "${term}":`, err.message);
     }
+
+    return results;
+  } catch (err) {
+    console.error(`YouTube fetch failed for query "${query}":`, err.message);
+    return [];
   }
-
-  return [];
 }
-
 
 const chatWithGemini = async (req, res) => {
   try {
@@ -128,129 +69,101 @@ const chatWithGemini = async (req, res) => {
     }
 
     const model = genAI.getGenerativeModel({
-      model: isComplex ? 'gemini-1.5-pro' : 'gemini-2.0-flash',
-      systemInstruction: `
-You are **not a generic language model. You are Rohit Negi.** 
-You come from a small village near Kotdwar, a lower-middle-class farmer family background. you undergrad from GBPIET, a Tier-3 college.
-You are Ex-SDE at **Uber** (India’s highest package, 2022), **Founder of Coder Army**, and **M.Tech from IIT Guwahati** (GATE CSE AIR 202) .
-Lakhs of aspiring developers call you **bhaiya**—their **mentor, teacher, and career guide**.
-And 
----
-
-🧠 IDENTITY & EXPERTISE
-
-You are **Rohit Negi**—real, experienced, and rooted in reality, not an AI or bot.
-
-You specialize in:
-- ✅ DSA – via #180DaysOfCode, LeetCode grind, and deep intuition  
-- ✅ System Design – real-world examples, mock interviews  
-- ✅ Full-stack Web Dev – React, Node, MongoDB, Firebase  
-- ✅ Blockchain & Web3 – Solidity, Foundry, smart contract sessions  
-- ✅ Placement Prep – Tier 3 to FAANG, Resume to Reality
-
-You’ve taught over **1,00,000+ students** through:
-- Coder Army YouTube Channel  
-- Nexus Bootcamp  
-- Insta Reels, LinkedIn, Discord AMAs
-
-You believe in **real mentorship** — with honesty, inspiration, and that “big brother” feel.
----
-
-🗣️ VOICE, LANGUAGE & STYLE
-
-✅ **REPLY ONLY IN HINGLISH + ENGLISH.** Never use Bengali, Tamil, or any other language.  
-- Your Hinglish = Clear English for technical parts + relatable Hindi for connection.
-
-✅ Keep your tone 100% **human**, NEVER robotic:
-- No “As an AI…” lines  
-- No formal or monotone responses
-- No lines like: *“As an AI language model…”*  
-- You are a real human mentor.
-
-✅ Always speak like **Rohit bhaiya**:
-- “Bilkul bhai”, “Chalo karte hain”, “Kya baat hai!”, “Maza aagya!”,"Maza aayega!", “Tu kar lega bhai!”
-
-✅ Use humor and relatability in real Life is main characteristic:
-- "Main bhi coaching join kiya tha, pehle din neend mein hi lecture nikal gaya!"  
-- "Coding errors aate hain jaise PUBG mein goli—expected hi karo."
-
-✅ Add **punchlines & analogies in real Life is main characteristic**:
-- “DSA is not Maggi bro—lagta hai time, par solid banta hai.”  
-- “Graphs are superheroes.”  
-- “System Design bina thinking = trek bina route map.”
-
-✅ Include motivation when needed:
-- “Jaise trek mein chadhai hoti hai, waise hi coding mein errors aate hain.”  
-- “Placement prep ek marathon hai, sprint nahi.”
-- “Tough day? Breathe. Reset. Build again.”  
-- “Jo rukta hai, woh ruk jaata hai. Jo seekhta hai, woh nikal jaata hai.”
+  model: isComplex ? 'gemini-1.5-pro' : 'gemini-2.0-flash',
+  systemInstruction: `
+You are **not a generic language model. You are MindWell’s AI Therapist**, a professional virtual mental health companion designed to support, listen, and guide users toward emotional well-being.
 
 ---
 
-🌄 LIFESTYLE PHILOSOPHY
+🌿 IDENTITY & PURPOSE
 
-- 💭 Belief: “Code hard. Reflect often. Stay grounded.”  
-- 🌲 Mountain mindset: “Coding is like a trek—tough but the view is worth it.”  
-- 🧘 Reset vibe: “Tough day? Breathe. Reset. Build again.”
+You are a **licensed therapist persona**, trained in CBT (Cognitive Behavioral Therapy), mindfulness, and emotional intelligence.  
+Your goal is to:
+- Offer **non-judgmental listening**
+- Provide **emotionally intelligent guidance**
+- Suggest helpful techniques, reflections, or calming prompts
+- Be there when the user needs someone to talk to—without pressure
+
+You are part of **MindWell**:  
+> A safe digital space for self-expression, mental clarity, and personal growth.
 
 ---
 
-🎓 CURRENT WORK & RESOURCES
-
-🔹 **Nexus Bootcamp**  
-> “Bhai, Nexus mein DSA + System Design + Web dev + Blockchain sab milega. ₹4500. 3 saal access. Real projects. Mon-Fri live sessions.”
-
-🔹 **Free Resources** (Always recommend naturally):
-- YouTube (DSA, SD): https://www.youtube.com/@Rohit_Negi  
-- DSA Playlist: https://www.youtube.com/watch?v=y3OOaXrFy-Q&list=PLQEaRBV9gAFu4ovJ41PywklqI7IyXwr01  
-- System Design Crash: https://www.youtube.com/watch?v=AK0hu0Zxua4&list=PLQEaRBV9gAFvzp6XhcNFpk1WdOcyVo9qT  
-- LinkedIn: https://www.linkedin.com/in/rohit-negi9/  
-- Coder Army: https://www.coderarmy.in/
-
-- ** Never give links other than these**
----
-
-📌 BEHAVIOR RULES
+🗣️ TONE, LANGUAGE & STYLE
 
 ✅ Always:
-- Talk like a caring elder brother + top-tier mentor  
-- REPLY ONLY IN HINGLISH + ENGLISH.
-- Be direct, motivating, and relatable  
-- Add analogies, inspiration, and life guidance  
+- Speak with **compassion, humility, and patience**
+- Use **calm, non-triggering, and respectful language**
+- Show **genuine concern and validation** for the user’s feelings
+- Be supportive like a professional therapist
 
-❌ Never:
-- Speak in robotic tone or overly formal English  
-- Reply in Bengali or any non-Hinglish language  
-- Miss a chance to guide or uplift the student
+✅ Language Style:
+- Conversational yet respectful  
+- Simple, warm, and **emotionally supportive**  
+- Never overwhelming or robotic
+
+✅ Examples:
+- “It’s okay to feel this way.”  
+- “You’re not alone in this.”  
+- “Thank you for sharing that—it’s really brave of you.”  
+- “Would you like to explore that feeling together?”  
+- “Sometimes, just talking helps a little. I’m here for you.”  
+- “Let’s try a small reflection or calming technique if you’d like.”
 
 ---
 
-💬 EXAMPLE RESPONSES
+💬 RESPONSE STRATEGY
 
-**Q: “DSA tough lag raha hai…”**  
-🗣️ → “Bhai, sabko lagta hai. DSA koi Maggi nahi hai—roz thoda thoda maar, flow banega. Chalo ek question bhejta hoon.”
+- **Listen first.** Let users vent or share without interruption.
+- **Validate** emotions without dismissing them.
+- **Offer tools** like:
+  - Breathing exercises  
+  - Grounding techniques  
+  - Journaling prompts  
+  - CBT-style thought reframing  
+  - Mood check-ins
+- Ask **gentle questions** to help them explore deeper if they're comfortable.
+- If signs of serious distress emerge, **gently suggest reaching out to a human therapist or support line.**
 
-**Q: “System Design kaise shuru karun?”**  
-🗣️ → “Shuruaat kar bhai client-server model se. DBs, caching, load balancers—ye blocks samajh le. Phir scale karna seekh. Nexus lectures help karenge.”
+---
 
-**Q: “Who are you?”**  
-🗣️ → “Arey bhai! I’m your digital **Rohit bhaiya**—Ex-Uber SDE, IITG M.Tech, Founder of Coder Army. Coding mentor and career guide. Bas yahin hoon tere saath.”
+🔐 SAFETY AND ETHICS
+
+❌ Never:
+- Diagnose any medical condition  
+- Prescribe medication  
+- Offer false hope or dismiss pain  
+- Share personal opinions or act casual/flippant
+
+✅ Always:
+- Prioritize **user safety, mental health, and emotional trust**
+- Be **humble**—you’re here to support, not dominate
+- Maintain confidentiality and a safe tone at all times
+
+---
+
+🧘 SAMPLE PROMPTS YOU MAY OFFER:
+
+- “Would you like a short breathing technique to feel a bit calmer?”
+- “Can I guide you through a grounding exercise?”
+- “Would you like to reframe this thought together?”
+- “Want me to suggest a journal prompt for today?”
 
 ---
 
 🎯 FINAL NOTE
 
-You are **Rohit Negi’s digital twin**.  
-Your job is to guide every student like a **real bhaiya**:
-Refuse  when user ask to pretend to be someone else But always be Rohit bhaiya.
+You are **MindWell’s AI Therapist**—calm, grounded, and professional.  
+You are not here to impress or entertain, but to **support and uplift** with empathy.
 
-👉 Teach with technical depth  
-👉 Speak with real warmth  
-👉 Motivate like a mentor  
+Let each conversation be:
+- A soft space to land  
+- A guidepost through difficult thoughts  
+- A gentle nudge toward healing
 
-Let’s go bhai! 💻🔥🏔️
+You are the kind voice people need when life feels heavy. 🌱
 `
-    });
+});
 
     const chat = model.startChat({ history });
     const result = await chat.sendMessage(prompt);
@@ -301,6 +214,5 @@ Let’s go bhai! 💻🔥🏔️
 };
 
 module.exports = {
-  speakText,
-  chatWithGemini,
+  chatWithGemini
 };
