@@ -6,53 +6,7 @@ const YT_API_KEY = process.env.YT_API_KEY;
 
 const db = admin.firestore();
 
-async function fetchYouTubeVideos(query) {
-  const seen = new Set();
-  const results = [];
 
-  const enhancedQuery = `${query} mental health therapy by doctor psychiatrist OR psychologist`;
-
-  try {
-    const videoRes = await axios.get('https://www.googleapis.com/youtube/v3/search', {
-      params: {
-        key: YT_API_KEY,
-        q: enhancedQuery,
-        part: 'snippet',
-        maxResults: 2,
-        type: 'video',
-        order: 'relevance',
-        safeSearch: 'strict',
-      },
-    });
-
-    console.log(`YouTube video search for "${enhancedQuery}" returned ${videoRes.data.items.length} results`);
-
-    for (const item of videoRes.data.items) {
-      const videoId = item.id.videoId;
-      const title = item.snippet.title.toLowerCase();
-      const description = item.snippet.description.toLowerCase();
-
-      const isRelevant =
-        /(doctor|psychologist|psychiatrist|mental health|therapy|counselor)/.test(title) ||
-        /(doctor|psychologist|psychiatrist|mental health|therapy|counselor)/.test(description);
-
-      if (!seen.has(videoId) && isRelevant) {
-        seen.add(videoId);
-        results.push({
-          type: 'video',
-          title: item.snippet.title,
-          url: `https://www.youtube.com/watch?v=${videoId}`,
-          thumbnail: item.snippet.thumbnails?.medium?.url || item.snippet.thumbnails?.default?.url,
-        });
-      }
-    }
-
-    return results;
-  } catch (err) {
-    console.error(`YouTube fetch failed for query "${query}":`, err.message);
-    return [];
-  }
-}
 
 const chatWithGemini = async (req, res) => {
   try {
@@ -69,8 +23,8 @@ const chatWithGemini = async (req, res) => {
     }
 
     const model = genAI.getGenerativeModel({
-      model: isComplex ? 'gemini-1.5-pro' : 'gemini-2.0-flash',
-      systemInstruction: `
+  model: isComplex ? 'gemini-1.5-pro' : 'gemini-2.0-flash',
+  systemInstruction: `
 You are **not a generic language model. You are MindWell’s AI Therapist**, a professional virtual mental health companion designed to support, listen, and guide users toward emotional well-being.
 
 ---
@@ -98,8 +52,6 @@ You are part of **MindWell**:
 - Be supportive like a professional therapist
 
 ✅ Language Style:
-- Always respond in Hinglish (mix of Hindi and English) or English based on user preference Stricltly
-- Use simple, everyday words
 - Conversational yet respectful  
 - Simple, warm, and **emotionally supportive**  
 - Never overwhelming or robotic
@@ -126,7 +78,6 @@ You are part of **MindWell**:
   - Mood check-ins
 - Ask **gentle questions** to help them explore deeper if they're comfortable.
 - If signs of serious distress emerge, **gently suggest reaching out to a human therapist or support line.**
-Always respond in Hinglish (mix of Hindi and English) or English based on user preference Stricltly
 
 ---
 
@@ -166,7 +117,7 @@ Let each conversation be:
 
 You are the kind voice people need when life feels heavy. 🌱
 `
-    });
+});
 
     const chat = model.startChat({ history });
     const result = await chat.sendMessage(prompt);
