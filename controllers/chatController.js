@@ -10,31 +10,33 @@ async function fetchYouTubeVideos(query) {
   const seen = new Set();
   const results = [];
 
+  const enhancedQuery = `${query} mental health therapy by doctor psychiatrist OR psychologist`;
+
   try {
     const videoRes = await axios.get('https://www.googleapis.com/youtube/v3/search', {
       params: {
         key: YT_API_KEY,
-        q: query,
+        q: enhancedQuery,
         part: 'snippet',
-        maxResults: 3, // Increased slightly to account for potential filtered videos
+        maxResults: 2,
         type: 'video',
         order: 'relevance',
         safeSearch: 'strict',
       },
     });
 
-    console.log(`YouTube video search for "${query}" returned ${videoRes.data.items.length} results`);
+    console.log(`YouTube video search for "${enhancedQuery}" returned ${videoRes.data.items.length} results`);
 
     for (const item of videoRes.data.items) {
       const videoId = item.id.videoId;
       const title = item.snippet.title.toLowerCase();
       const description = item.snippet.description.toLowerCase();
 
-      // Filter out self-harm related content
-      const isHarmful = /(self.?harm|shorts|suicide|cutting|self.?injury|self.?destructive)/i.test(title) || 
-                       /(self.?harm|suicide|shorts|cutting|self.?injury|self.?destructive)/i.test(description);
+      const isRelevant =
+        /(doctor|psychologist|psychiatrist|mental health|therapy|counselor)/.test(title) ||
+        /(doctor|psychologist|psychiatrist|mental health|therapy|counselor)/.test(description);
 
-      if (!seen.has(videoId) && !isHarmful) {
+      if (!seen.has(videoId) && isRelevant) {
         seen.add(videoId);
         results.push({
           type: 'video',
@@ -45,7 +47,7 @@ async function fetchYouTubeVideos(query) {
       }
     }
 
-    return results.slice(0, 2); // Return max 2 videos after filtering
+    return results;
   } catch (err) {
     console.error(`YouTube fetch failed for query "${query}":`, err.message);
     return [];
