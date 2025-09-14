@@ -8,6 +8,16 @@ model = AutoModelForSequenceClassification.from_pretrained("unitary/toxic-bert")
 
 app = FastAPI()
 
+from fastapi.middleware.cors import CORSMiddleware
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # or ["http://localhost:3000"] for stricter security
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 class TextRequest(BaseModel):
     text: str
 
@@ -24,7 +34,7 @@ async def moderate_text(request: TextRequest):
     labels = model.config.id2label
     output = {labels[i]: float(probs[i]) for i in range(len(probs))}
 
-    toxic_flag = max(output.values()) > 0.7
+    toxic_flag = max(output.values()) > 0.6
     return {"input": request.text, "labels": output, "toxic": toxic_flag}
 
 
