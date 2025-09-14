@@ -64,14 +64,19 @@ const respondToRequest = async (req, res) => {
     let psychiatristName = null;
 
     if (action === "accept") {
-      // Fetch psychiatrist data from 'psychiatrists' collection
-      const psyDoc = await db.collection('psychiatrists').doc(psychiatristId).get();
+      // Fetch psychiatrist data from 'users' collection
+      const psyDoc = await db.collection('users').doc(psychiatristId).get();
 
       if (!psyDoc.exists) {
         return res.status(404).json({ error: "Psychiatrist not found." });
       }
 
-      psychiatristName = psyDoc.data().name;
+      const psyData = psyDoc.data();
+      if (psyData.role !== 'psychiatrist') {
+        return res.status(403).json({ error: "User is not a psychiatrist." });
+      }
+
+      psychiatristName = psyData.name;
     }
 
     const updateData = {
@@ -136,11 +141,17 @@ const respondToRequestAtomic = async (req, res) => {
 
     let psychiatristName = null;
     if (action === 'accept') {
-      const psyDoc = await db.collection('psychiatrists').doc(psychiatristId).get();
+      const psyDoc = await db.collection('users').doc(psychiatristId).get();
       if (!psyDoc.exists) {
         return res.status(404).json({ error: 'Psychiatrist not found.' });
       }
-      psychiatristName = psyDoc.data().name;
+      
+      const psyData = psyDoc.data();
+      if (psyData.role !== 'psychiatrist') {
+        return res.status(403).json({ error: 'User is not a psychiatrist.' });
+      }
+      
+      psychiatristName = psyData.name;
     }
 
     await db.runTransaction(async (tx) => {
