@@ -41,8 +41,8 @@ const createRequest = async (req, res) => {
     // Create a new request document
     const docRef = await db.collection('requests').add({
       studentId,
-      studentName,
-      studentEmail,
+      // studentName,
+      // studentEmail,
       college,
       message: message || "",
       createdAt: createdAt || new Date().toISOString(),
