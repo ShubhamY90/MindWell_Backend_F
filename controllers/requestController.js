@@ -116,9 +116,6 @@ const respondToRequest = async (req, res) => {
   }
 };
 
-
-module.exports = { createRequest, respondToRequest };
-
 // List requests by college (and optional status)
 const listRequestsByCollege = async (req, res) => {
   try {
@@ -149,6 +146,31 @@ const listRequestsByCollege = async (req, res) => {
   }
 };
 
+// List all requests (optional status)
+const listAllRequests = async (req, res) => {
+  try {
+    const { status } = req.query; // optional: pending | accepted | rejected
+
+    let query = db.collection('requests');
+    if (status) {
+      query = query.where('status', '==', status);
+    }
+
+    const snap = await query.get();
+    const items = snap.docs
+      .map(d => ({ id: d.id, ...d.data() }))
+      .sort((a, b) => {
+        const aTime = new Date(a.createdAt || 0).getTime();
+        const bTime = new Date(b.createdAt || 0).getTime();
+        return bTime - aTime; // descending
+      });
+    return res.status(200).json({ requests: items });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+};
+
+
 // Atomic accept/reject using a transaction to avoid races
 const respondToRequestAtomic = async (req, res) => {
   const { id } = req.params;
@@ -178,11 +200,12 @@ const respondToRequestAtomic = async (req, res) => {
         }
       }
       if (!psyDoc.exists) {
-        return res.status(404).json({ error: 'Psychiatrist not found.' });
+        return res.status(404).json({ error: 'Clinician not found.' });
       }
       const psyData = psyDoc.data();
-      if (psyData.role !== 'psychiatrist') {
-        return res.status(403).json({ error: 'User is not a psychiatrist.' });
+      const allowedRoles = ['psychiatrist', 'doctor', 'company_doctor'];
+      if (!allowedRoles.includes(psyData.role)) {
+        return res.status(403).json({ error: 'User is not an authorized clinician.' });
       }
       psychiatristName = psyData.name;
     }
@@ -299,5 +322,6 @@ module.exports = {
   createRequest,
   respondToRequest,
   listRequestsByCollege,
+  listAllRequests,
   respondToRequestAtomic,
 };
