@@ -14,8 +14,9 @@ const chatWithGemini = async (req, res) => {
     if (!idToken) return res.status(401).json({ error: 'No token provided' });
 
     const decodedToken = await admin.auth().verifyIdToken(idToken);
+    const uid = decodedToken.uid;
     const email = decodedToken.email;
-    if (!email) return res.status(400).json({ error: 'Email not found in token' });
+    if (!uid) return res.status(400).json({ error: 'UID not found in token' });
 
     const { prompt, isComplex, history, sessionRef } = req.body;
     if (!prompt || !Array.isArray(history)) {
@@ -23,8 +24,9 @@ const chatWithGemini = async (req, res) => {
     }
 
     const model = genAI.getGenerativeModel({
-  model: isComplex ? 'gemini-1.5-pro' : 'gemini-2.0-flash',
-  systemInstruction: `
+      model: isComplex ? 'gemini-1.5-pro' : 'gemini-2.0-flash',
+      // ... systemInstruction remains same ...
+      systemInstruction: `
 You are **not a generic language model. You are MindWell’s AI Therapist**, a professional virtual mental health companion designed to support, listen, and guide users toward emotional well-being.
 
 ---
@@ -117,7 +119,7 @@ Let each conversation be:
 
 You are the kind voice people need when life feels heavy. 🌱
 `
-});
+    });
 
     const chat = model.startChat({ history });
     const result = await chat.sendMessage(prompt);
@@ -130,22 +132,39 @@ You are the kind voice people need when life feels heavy. 🌱
 
     let sessionDocRef;
     if (sessionRef) {
-      // 🔁 Existing session - append turns
-      sessionDocRef = db.collection('chatbot').doc(email).collection('sessions').doc(sessionRef);
-      await sessionDocRef.update({
+      // 🔁 Existing session - check both paths
+      const uidPath = db.collection('chatbot').doc(uid).collection('sessions').doc(sessionRef);
+      const emailPath = email ? db.collection('chatbot').doc(email).collection('sessions').doc(sessionRef) : null;
+
+      const [uidDoc, emailDoc] = await Promise.all([
+        uidPath.get(),
+        emailPath ? emailPath.get() : Promise.resolve({ exists: false })
+      ]);
+
+      if (uidDoc.exists) {
+        sessionDocRef = uidPath;
+      } else if (emailDoc.exists) {
+        sessionDocRef = emailPath;
+      } else {
+        // Fallback or treat as new if sessionRef was provided but not found
+        sessionDocRef = uidPath;
+      }
+
+      await sessionDocRef.set({
         history: admin.firestore.FieldValue.arrayUnion(...newTurns),
         updatedAt: new Date().toISOString(),
-      });
+      }, { merge: true });
     } else {
-      // 🆕 New session
+      // 🆕 New session - always use UID path
       const now = new Date();
       const newSessionId = now.toISOString().replace(/[:.]/g, '-');
-      sessionDocRef = db.collection('chatbot').doc(email).collection('sessions').doc(newSessionId);
+      sessionDocRef = db.collection('chatbot').doc(uid).collection('sessions').doc(newSessionId);
       await sessionDocRef.set({
         prompt,
         reply,
         history: newTurns,
         createdAt: now.toISOString(),
+        updatedAt: now.toISOString()
       });
     }
 

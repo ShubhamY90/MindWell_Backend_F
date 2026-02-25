@@ -41,8 +41,8 @@ const createRequest = async (req, res) => {
     // Create a new request document
     const docRef = await db.collection('requests').add({
       studentId,
-      // studentName,
-      // studentEmail,
+      studentName,
+      studentEmail,
       college,
       message: message || "",
       createdAt: createdAt || new Date().toISOString(),
@@ -239,17 +239,17 @@ const respondToRequestAtomic = async (req, res) => {
 
       // 2) Create or upsert a chat document between psychiatrist and student (best-effort)
       try {
-        const studentEmail = requestPre.studentEmail;
-        if (studentEmail && psychiatristId) {
-          // Search for existing chat between these participants
+        const studentId = requestPre.studentId;
+        if (studentId && psychiatristId) {
+          // Search for existing chat between these participants using UIDs
           const chatsRef = db.collection('chats');
           const candidate1 = await chatsRef
             .where('senderId', '==', psychiatristId)
-            .where('receiverId', '==', studentEmail)
+            .where('receiverId', '==', studentId)
             .limit(1)
             .get();
           const candidate2 = await chatsRef
-            .where('senderId', '==', studentEmail)
+            .where('senderId', '==', studentId)
             .where('receiverId', '==', psychiatristId)
             .limit(1)
             .get();
@@ -259,11 +259,21 @@ const respondToRequestAtomic = async (req, res) => {
           else if (!candidate2.empty) chatDocRef = candidate2.docs[0].ref;
 
           if (!chatDocRef) {
-            await chatsRef.add({
+            // Create chat document in the requested schema
+            const newChat = await chatsRef.add({
               senderId: psychiatristId,
-              receiverId: studentEmail,
-              lastMessage: '',
-              lastMessageAt: new Date().toISOString(),
+              receiverId: studentId,
+              lastMessage: 'Request accepted. You can now chat.',
+              lastMessageAt: admin.firestore.FieldValue.serverTimestamp(),
+            });
+            chatDocRef = newChat;
+
+            // Optional: add a system/initial message in subcollection if requested
+            await chatDocRef.collection('messages').add({
+              senderId: psychiatristId,
+              receiverId: studentId,
+              text: 'Hello! I have accepted your request for support. How can I help you today?',
+              timestamp: admin.firestore.FieldValue.serverTimestamp(),
             });
           }
         }
