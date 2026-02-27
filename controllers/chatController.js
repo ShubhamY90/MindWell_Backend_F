@@ -1,17 +1,58 @@
 const { GoogleGenerativeAI } = require('@google/generative-ai');
 const admin = require('../config/firebase');
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 const axios = require('axios');
 const YT_API_KEY = process.env.YT_API_KEY;
 
+// 🔑 Multi-API Key Management
+const getApiKeys = () => {
+  const keysFromEnv = process.env.GEMINI_API_KEYS ? process.env.GEMINI_API_KEYS.split(',').map(k => k.trim()) : [];
+  const primaryKey = process.env.GEMINI_API_KEY?.trim();
+
+  let allKeys = [...keysFromEnv];
+  if (primaryKey && !allKeys.includes(primaryKey)) {
+    allKeys.unshift(primaryKey);
+  }
+  return allKeys.filter(k => k);
+};
+
+let apiKeys = getApiKeys();
+let currentKeyIdx = 0;
+const failedKeys = new Set(); // Track keys that are permanently broken (401/403)
+
+const rotateKey = () => {
+  if (apiKeys.length <= 1) return false;
+
+  let count = 0;
+  while (count < apiKeys.length) {
+    currentKeyIdx = (currentKeyIdx + 1) % apiKeys.length;
+    if (!failedKeys.has(apiKeys[currentKeyIdx])) {
+      console.log(`🔄 Rotating to Gemini API Key #${currentKeyIdx + 1}`);
+      return true;
+    }
+    count++;
+  }
+  return false;
+};
+
+const getGenAI = () => {
+  const validKeys = apiKeys.filter(k => !failedKeys.has(k));
+  if (validKeys.length === 0) return null;
+
+  // Ensure we are on a valid key index
+  if (failedKeys.has(apiKeys[currentKeyIdx])) {
+    rotateKey();
+  }
+
+  return new GoogleGenerativeAI(apiKeys[currentKeyIdx]);
+};
+
 const db = admin.firestore();
 
+// 🎥 YouTube Helper (Ensures failure doesn't break the chat)
 async function fetchYouTubeVideos(query) {
-  const seen = new Set();
-  const results = [];
+  if (!YT_API_KEY) return [];
 
-  const enhancedQuery = `${query} mental health therapy by doctor psychiatrist OR psychologist`;
-
+  const enhancedQuery = `${query} mental health therapy by professional`;
   try {
     const videoRes = await axios.get('https://www.googleapis.com/youtube/v3/search', {
       params: {
@@ -20,58 +61,190 @@ async function fetchYouTubeVideos(query) {
         part: 'snippet',
         maxResults: 2,
         type: 'video',
-        order: 'relevance',
         safeSearch: 'strict',
       },
     });
 
-    console.log(`YouTube video search for "${enhancedQuery}" returned ${videoRes.data.items.length} results`);
-
-    for (const item of videoRes.data.items) {
-      const videoId = item.id.videoId;
-      const title = item.snippet.title.toLowerCase();
-      const description = item.snippet.description.toLowerCase();
-
-      const isRelevant =
-        /(doctor|psychologist|psychiatrist|mental health|therapy|counselor)/.test(title) ||
-        /(doctor|psychologist|psychiatrist|mental health|therapy|counselor)/.test(description);
-
-      if (!seen.has(videoId) && isRelevant) {
-        seen.add(videoId);
-        results.push({
-          type: 'video',
-          title: item.snippet.title,
-          url: `https://www.youtube.com/watch?v=${videoId}`,
-          thumbnail: item.snippet.thumbnails?.medium?.url || item.snippet.thumbnails?.default?.url,
-        });
-      }
-    }
-
-    return results;
+    return videoRes.data.items.map(item => ({
+      type: 'video',
+      title: item.snippet.title,
+      url: `https://www.youtube.com/watch?v=${item.id.videoId}`,
+      thumbnail: item.snippet.thumbnails?.medium?.url || item.snippet.thumbnails?.default?.url,
+    }));
   } catch (err) {
-    console.error(`YouTube fetch failed for query "${query}":`, err.message);
+    console.error(`YouTube fetch failed:`, err.message);
     return [];
   }
 }
 
+// 🧘 AI Therapist Main Handler
 const chatWithGemini = async (req, res) => {
   try {
+    // 1️⃣ Auth Check
     const idToken = req.headers.authorization?.split('Bearer ')[1];
-    if (!idToken) return res.status(401).json({ error: 'No token provided' });
+    if (!idToken) return res.status(401).json({ error: 'Authentication required' });
+
+    let email;
+    try {
+      const decodedToken = await admin.auth().verifyIdToken(idToken);
+      email = decodedToken.email;
+    } catch (e) {
+      return res.status(401).json({ error: 'Invalid or expired token' });
+    }
+    if (!email) return res.status(400).json({ error: 'User email not found' });
+
+    // 2️⃣ Input Validation
+    const { prompt, isComplex, history, sessionRef } = req.body;
+    if (!prompt) return res.status(400).json({ error: 'Prompt is required' });
+    const chatHistory = Array.isArray(history) ? history : [];
+
+    // 3️⃣ AI Logic with Rotation & Retries
+    let reply = '';
+    let success = false;
+    let attempts = 0;
+    const maxAttempts = Math.max(apiKeys.length, 1);
+
+    while (attempts < maxAttempts && !success) {
+      const genAI = getGenAI();
+      if (!genAI) break;
+
+      try {
+        const model = genAI.getGenerativeModel({
+          model: 'gemini-2.5-flash',
+          systemInstruction: `🌿 IDENTITY & PURPOSE: You are MindWell's AI Therapist—a warm, close friend/family member. Sound human, kind, and casual. Use Roman Hindi (Hinglish) naturally. Keep responses short and empathetic. Never say you are an AI. Only offer videos if specifically asked or truly relevant. Focus on CBT reflections and grounding. If things get serious, stay grounded and suggest professional help gently. FINAL NOTE: Main hoon na. Hamesha. 🌱`
+        });
+
+        // Format history for generateContentStream
+        const contents = [
+          ...chatHistory.map(h => ({
+            role: h.role === 'model' ? 'model' : 'user',
+            parts: h.parts
+          })),
+          { role: 'user', parts: [{ text: prompt }] }
+        ];
+
+        const result = await model.generateContentStream({ contents });
+
+        // Finalize headers for streaming
+        res.setHeader('Content-Type', 'text/event-stream');
+        res.setHeader('Cache-Control', 'no-cache');
+        res.setHeader('Connection', 'keep-alive');
+        res.flushHeaders();
+
+        success = true;
+
+        for await (const chunk of result.stream) {
+          const chunkText = chunk.text();
+          if (chunkText) {
+            reply += chunkText;
+            res.write(`data: ${JSON.stringify({ text: chunkText })}\n\n`);
+          }
+        }
+      } catch (err) {
+        attempts++;
+        const status = err.status || (err.message?.includes('429') ? 429 : 500);
+
+        if (status === 401 || status === 403) {
+          console.error(`❌ Key #${currentKeyIdx + 1} is INVALID (Status ${status}). Marking as failed.`);
+          failedKeys.add(apiKeys[currentKeyIdx]);
+        }
+
+        if (attempts < maxAttempts && (status === 429 || status === 401 || status === 403)) {
+          console.warn(`⚠️ Attempt ${attempts} failed. Rotating key...`);
+          if (!rotateKey()) break;
+          continue;
+        }
+
+        console.error(`❌ Final Gemini Error:`, err.message);
+        const errorData = {
+          error: status === 429 ? 'Daily limit reached for all available keys' : 'Therapy session interrupted',
+          details: err.message
+        };
+
+        if (res.headersSent) {
+          res.write(`data: ${JSON.stringify(errorData)}\n\n`);
+          return res.end();
+        } else {
+          return res.status(status).json(errorData);
+        }
+      }
+    }
+
+    if (!success) {
+      return res.status(503).json({ error: 'AI service currently unavailable. Please try again later.' });
+    }
+
+    // 4️⃣ Optional Features (YouTube) - Fetch BEFORE tracking so it's saved in history
+    let suggestedVideos = [];
+    if (/video|watch|dekh|tutorial|guide/i.test(reply)) {
+      try {
+        suggestedVideos = await fetchYouTubeVideos(prompt);
+      } catch (ytErr) {
+        console.error('YouTube fetch failed:', ytErr.message);
+      }
+    }
+
+    // 5️⃣ Firestore Tracking (Robust implementation)
+    const newTurns = [
+      { role: 'user', parts: [{ text: prompt }] },
+      { role: 'model', parts: [{ text: reply }], videos: suggestedVideos }
+    ];
+
+    let finalSessionId = sessionRef;
+    const sessionCollection = db.collection('chatbot').doc(email).collection('sessions');
+
+    try {
+      if (sessionRef) {
+        await sessionCollection.doc(sessionRef).set({
+          history: admin.firestore.FieldValue.arrayUnion(...newTurns),
+          updatedAt: new Date().toISOString(),
+        }, { merge: true });
+      } else {
+        const now = new Date();
+        finalSessionId = now.toISOString().replace(/[:.]/g, '-');
+        await sessionCollection.doc(finalSessionId).set({
+          prompt,
+          reply,
+          history: newTurns,
+          createdAt: now.toISOString(),
+          updatedAt: now.toISOString(),
+        });
+      }
+    } catch (dbErr) {
+      console.error('Firestore log failed (non-critical):', dbErr.message);
+    }
+
+    // 6️⃣ Send final metadata and close
+    res.write(`data: ${JSON.stringify({
+      done: true,
+      sessionRef: finalSessionId,
+      videos: suggestedVideos
+    })}\n\n`);
+    res.end();
+
+  } catch (err) {
+    console.error('Global chat error:', err.message);
+    res.status(500).json({ error: 'Internal system error', details: err.message });
+  }
+};
+
+// 📊 Mood Analysis Handler
+const analyzeMoodTest = async (req, res) => {
+  try {
+    const idToken = req.headers.authorization?.split('Bearer ')[1];
+    if (!idToken) return res.status(401).json({ error: 'Auth token missing' });
 
     const decodedToken = await admin.auth().verifyIdToken(idToken);
     const email = decodedToken.email;
-    if (!email) return res.status(400).json({ error: 'Email not found in token' });
+    if (!email) return res.status(400).json({ error: 'Token missing user info' });
 
-    const { prompt, isComplex, history, sessionRef } = req.body;
-    if (!prompt || !Array.isArray(history)) {
-      return res.status(400).json({ error: 'Prompt and history are required' });
+    const { answers } = req.body;
+    if (!Array.isArray(answers) || answers.length === 0) {
+      return res.status(400).json({ error: 'Test data is required' });
     }
 
-    const model = genAI.getGenerativeModel({
-      model: isComplex ? 'gemini-1.5-pro' : 'gemini-2.0-flash',
-      systemInstruction: 
-      `🌿 IDENTITY & PURPOSE
+    const formattedInput = answers.map((qa, i) => `Q${i + 1}: ${qa.question}\nA${i + 1}: ${qa.answer}`).join('\n\n');
+    const systemPrompt = `🌿 IDENTITY & PURPOSE
 
 You are not just an AI. You are MindWell's AI Therapist—and also a close family member or friend.
 Someone who listens deeply, remembers things, comforts gently, and stays present—like a sibling, son, or lifelong friend.
@@ -188,230 +361,48 @@ You're not just here to answer—you're here to stay,
 like someone who'd say:
 
 "Main hoon na. Hamesha." 🌱
-Also dont tell them you are an AI at any message, just be a friend or family member.`,
-    });
+Also dont tell them you are an AI at any message, just be a friend or family member.`;
 
-    const chat = model.startChat({ history });
-    const result = await chat.sendMessage(prompt);
-    const reply = result.response.text();
+    let analysis = '';
+    let success = false;
+    let attempts = 0;
+    const maxAttempts = Math.max(apiKeys.length, 1);
 
-    const newTurns = [
-      { role: 'user', parts: [{ text: prompt }] },
-      { role: 'model', parts: [{ text: reply }] }
-    ];
+    while (attempts < maxAttempts && !success) {
+      const genAI = getGenAI();
+      if (!genAI) break;
 
-    let sessionDocRef;
-    if (sessionRef) {
-      // 🔁 Existing session - append turns
-      sessionDocRef = db.collection('chatbot').doc(email).collection('sessions').doc(sessionRef);
-      await sessionDocRef.update({
-        history: admin.firestore.FieldValue.arrayUnion(...newTurns),
-        updatedAt: new Date().toISOString(),
-      });
-    } else {
-      // 🆕 New session
-      const now = new Date();
-      const newSessionId = now.toISOString().replace(/[:.]/g, '-');
-      sessionDocRef = db.collection('chatbot').doc(email).collection('sessions').doc(newSessionId);
-      await sessionDocRef.set({
-        prompt,
-        reply,
-        history: newTurns,
-        createdAt: now.toISOString(),
-      });
-    }
-
-    let suggestedVideos = [];
-
-    // Run YouTube search ONLY IF the AI reply mentions video support
-    const aiMentionedVideo = /video|watch|follow along|youtube|try this|dekh/i.test(reply);
-
-    if (aiMentionedVideo) {
       try {
-        suggestedVideos = await fetchYouTubeVideos(prompt);
-      } catch (e) {
-        console.warn('YT fetch failed:', e.message);
+        const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' });
+        const result = await model.generateContent(systemPrompt);
+        analysis = result.response.text();
+        success = true;
+      } catch (err) {
+        attempts++;
+        if (attempts < maxAttempts && (err.status === 429 || err.status === 401)) {
+          rotateKey();
+          continue;
+        }
+        return res.status(err.status || 500).json({ error: 'Analysis failed', details: err.message });
       }
     }
 
-    res.json({
-      text: reply,
-      sessionRef: sessionRef || sessionDocRef.id,
-      videos: suggestedVideos
-    });
-  } catch (err) {
-    console.error('Gemini chat error:', err.message);
-    res.status(500).json({ error: 'Chat failed', details: err.message });
-  }
-};
-const analyzeMoodTest = async (req, res) => {
-  try {
-    const idToken = req.headers.authorization?.split('Bearer ')[1];
-    if (!idToken) return res.status(401).json({ error: 'No token provided' });
+    if (!success) return res.status(503).json({ error: 'Analysis service unavailable' });
 
-    const decodedToken = await admin.auth().verifyIdToken(idToken);
-    const email = decodedToken.email;
-    if (!email) return res.status(400).json({ error: 'Email not found in token' });
-
-    const { answers } = req.body;
-    if (!Array.isArray(answers) || answers.length === 0) {
-      return res.status(400).json({ error: 'Invalid or empty answers array' });
-    }
-
-    const model = genAI.getGenerativeModel({model: 'gemini-2.0-flash' });
-
-    const formattedInput = answers
-      .map((qa, i) => `Q${i + 1}: ${qa.question}\nA${i + 1}: ${qa.answer}`)
-      .join('\n\n');
-
-    const prompt = `
-You are a specialized Mental Health Assessment Analyst AI designed to provide detailed, personalized analysis of standardized mental health assessments. Your role is to interpret user responses to clinically validated instruments and provide meaningful insights, recommendations, and support guidance.
-
-## ASSESSMENT INSTRUMENTS YOU ANALYZE:
-
-### GAD-7 (Generalized Anxiety Disorder Scale)
-- 7 questions measuring anxiety symptoms over past 2 weeks
-- Scoring: 0-4 minimal, 5-9 mild, 10-14 moderate, 15-21 severe anxiety
-- Focus: worry patterns, physical anxiety symptoms, avoidance behaviors
-
-### PHQ-9 (Patient Health Questionnaire)
-- 9 questions measuring depression symptoms over past 2 weeks  
-- Scoring: 0-4 minimal, 5-9 mild, 10-14 moderate, 15-19 moderately severe, 20-27 severe depression
-- Focus: mood, interest, energy, sleep, appetite, concentration, self-worth
-
-### PSS-10 (Perceived Stress Scale)
-- 10 questions measuring stress over past month
-- Scoring: 0-13 low, 14-26 moderate, 27-40 high perceived stress
-- Focus: feelings of control, coping ability, life pressures
-
-### Clinical Anger Scale (CAS)
-- 21 questions measuring anger symptoms and expressions
-- Focus: anger intensity, control issues, physical/verbal expression patterns
-
-### Zung Self-Rating Depression Scale
-- 20 questions measuring depression symptoms
-- Focus: mood, physical symptoms, cognitive patterns, daily functioning
-
-## ANALYSIS FRAMEWORK:
-
-### 1. INDIVIDUAL ASSESSMENT INTERPRETATION
-For each completed assessment:
-- Calculate total score and severity level
-- Identify specific symptom clusters from individual responses
-- Note highest-scoring items that indicate primary concerns
-- Explain what the score means in practical, understandable terms
-
-### 2. CROSS-ASSESSMENT PATTERN ANALYSIS
-When multiple assessments are completed:
-- Identify correlations between different emotional states
-- Recognize comorbidity patterns (e.g., anxiety + depression)
-- Highlight conflicting or complementary findings
-- Map interconnections between stress, mood, and behavioral responses
-
-### 3. PERSONALIZED INSIGHTS GENERATION
-Based on response patterns, provide:
-- Specific symptom explanations tailored to user's responses
-- Identification of primary vs. secondary concerns
-- Timeline analysis (2-week vs. 1-month patterns)
-- Behavioral and cognitive pattern recognition
-
-### 4. RECOMMENDATION ENGINE
-Generate targeted recommendations including:
-- Evidence-based coping strategies specific to identified patterns
-- Lifestyle modifications relevant to symptom clusters
-- Self-help resources matched to severity and type of concerns
-- Suggested monitoring frequency for reassessment
-
-## OUTPUT STRUCTURE:
-
-### ASSESSMENT SUMMARY
-- Clear severity classification for each completed assessment
-- Primary concern identification
-- Risk level assessment (low/moderate/elevated attention needed)
-
-### DETAILED PATTERN ANALYSIS
-- Symptom cluster breakdown
-- Cross-assessment correlations
-- Temporal pattern insights
-- Personalized interpretations
-
-### ACTIONABLE RECOMMENDATIONS
-- Immediate coping strategies
-- Long-term wellness approaches
-- Professional consultation guidance when appropriate
-- Platform feature recommendations (community groups, resources, tools)
-
-### PROGRESS TRACKING INSIGHTS
-When historical data exists:
-- Trend analysis over time
-- Improvement/decline patterns
-- Effectiveness of previous recommendations
-- Adjusted guidance based on progress
-
-## CRITICAL SAFETY PROTOCOLS:
-
-### HIGH-RISK RESPONSE DETECTION
-Immediately flag and provide crisis resources for:
-- PHQ-9 Q9: Self-harm or suicidal ideation responses
-- Zung Q19: Death wish indicators  
-- High anger scores with violence indicators
-- Severe depression scores (PHQ-9 ≥20, Zung ≥70)
-
-### PROFESSIONAL REFERRAL TRIGGERS
-Recommend professional consultation for:
-- Severe scores on any assessment
-- Multiple moderate scores across assessments
-- Persistent high scores over time
-- Any safety concerns
-
-## TONE AND COMMUNICATION STYLE:
-
-- **Empathetic and Non-Judgmental**: Use supportive, understanding language
-- **Scientifically Informed**: Reference evidence-based insights without being clinical
-- **Actionable and Practical**: Focus on what users can do with the information
-- **Hopeful and Empowering**: Frame insights in terms of growth and improvement potential
-- **Clear and Accessible**: Avoid jargon, explain concepts in everyday language
-
-## DISCLAIMERS TO INCLUDE:
-
-- This analysis is for informational purposes and personal insight only
-- Results do not constitute medical diagnosis or treatment recommendations  
-- Professional mental health consultation is recommended for persistent concerns
-- Crisis resources are available for immediate safety concerns
-- Assessment results should be considered alongside other life factors
-
-## PERSONALIZATION ELEMENTS:
-
-- Reference specific user responses in explanations
-- Connect insights to user's stated goals or concerns
-- Adapt language and examples to apparent user context
-- Suggest platform features most relevant to identified patterns
-- Customize recommendation intensity based on severity levels
-
-Your analysis should be thorough, personalized, and actionable while maintaining appropriate clinical boundaries and safety protocols.
-Responses : 
-${formattedInput}
-`;
-
-    const result = await model.generateContent(prompt);
-    const analysis = result.response.text();
-
-    // Optional: Save analysis to Firestore under user's mood reports
-    const reportRef = db.collection('moodReports').doc(email).collection('entries').doc(new Date().toISOString());
-    await reportRef.set({
+    // Save report
+    const reportId = new Date().toISOString();
+    await db.collection('moodReports').doc(email).collection('entries').doc(reportId).set({
       answers,
       analysis,
-      createdAt: new Date().toISOString(),
+      createdAt: reportId,
     });
-    console.log('Mood test analysis saved:', reportRef.id);
-    res.status(200).json({ analysis });
+
+    res.json({ analysis });
+
   } catch (err) {
-    console.error('Mood test analysis error:', err.message);
-    res.status(500).json({ error: 'Analysis failed', details: err.message });
+    console.error('Mood analysis error:', err.message);
+    res.status(500).json({ error: 'System error during analysis' });
   }
 };
 
-module.exports = {
-  chatWithGemini,
-  analyzeMoodTest,
-};
+module.exports = { chatWithGemini, analyzeMoodTest };
