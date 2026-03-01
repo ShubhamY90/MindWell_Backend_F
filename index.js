@@ -22,6 +22,9 @@ app.use('/api/auth', authRoutes);
 app.use('/api', dbRoutes);
 app.use('/api/request', requestRoutes);
 app.use('/api/messages', messageRoutes);
+app.get("/health", (req, res) => {
+  res.status(200).send("OK");
+});
 
 app.listen(4000, () => {
   console.log('Backend running on http://localhost:4000');
