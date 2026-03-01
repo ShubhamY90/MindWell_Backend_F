@@ -17,7 +17,7 @@ const sendMessage = async (req, res) => {
         const uid = decodedToken.uid;
 
         // 2️⃣ Input Validation
-        const { senderId, receiverId, text, options = {} } = req.body;
+        const { senderId, receiverId, senderName, receiverName, text, options = {} } = req.body;
 
         if (!text || !text.trim()) {
             return res.status(400).json({ error: 'Message text cannot be empty' });
@@ -63,6 +63,8 @@ const sendMessage = async (req, res) => {
             const newChatRef = await chatsRef.add({
                 senderId,
                 receiverId,
+                senderName: senderName || 'Unknown',
+                receiverName: receiverName || 'Unknown',
                 lastMessage: text.trim(),
                 lastMessageAt: timestamp,
                 createdAt: timestamp
