@@ -17,7 +17,7 @@ const sendMessage = async (req, res) => {
         const uid = decodedToken.uid;
 
         // 2️⃣ Input Validation
-        const { senderId, receiverId, senderName, receiverName, text, options = {} } = req.body;
+        const { senderId, receiverId, senderName, receiverName, text, iv, salt, options = {} } = req.body;
 
         if (!text || !text.trim()) {
             return res.status(400).json({ error: 'Message text cannot be empty' });
@@ -65,7 +65,7 @@ const sendMessage = async (req, res) => {
                 receiverId,
                 senderName: senderName || 'Unknown',
                 receiverName: receiverName || 'Unknown',
-                lastMessage: text.trim(),
+                lastMessage: '🔒 Encrypted Message...',
                 lastMessageAt: timestamp,
                 createdAt: timestamp
             });
@@ -74,7 +74,7 @@ const sendMessage = async (req, res) => {
         } else {
             // update chat with last message
             await chatDocRef.update({
-                lastMessage: text.trim(),
+                lastMessage: '🔒 Encrypted Message...',
                 lastMessageAt: timestamp
             });
         }
@@ -83,7 +83,9 @@ const sendMessage = async (req, res) => {
         const messageRef = await chatDocRef.collection('messages').add({
             senderId,
             receiverId,
-            text: text.trim(),
+            text: text.trim(), // The encrypted payload
+            iv: iv || null,
+            salt: salt || null,
             timestamp
         });
 

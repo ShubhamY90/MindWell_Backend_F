@@ -1,5 +1,6 @@
 const admin = require('../config/firebase.js');
 const db = admin.firestore();
+const { decryptText } = require('../utils/cryptoUtils.js');
 
 
 const getAllSessions = async (req, res) => {
@@ -23,7 +24,25 @@ const getAllSessions = async (req, res) => {
 
     const processDocs = (docs) => {
       docs.forEach(doc => {
-        const data = doc.data();
+        let data = doc.data();
+
+        // Decrypt text if encrypted payload exists
+        try {
+          if (data.prompt && data.prompt.data) { data.prompt = decryptText(data.prompt, email); }
+          if (data.reply && data.reply.data) { data.reply = decryptText(data.reply, email); }
+
+          if (data.history && Array.isArray(data.history)) {
+            data.history = data.history.map(t => ({
+              ...t,
+              parts: t.parts?.map(p => ({
+                text: p.encryptedPayload ? decryptText(p.encryptedPayload, email) : (p.text || "") // fallback to plaintext for old records
+              }))
+            }));
+          }
+        } catch (decErr) {
+          console.error("Decryption failed for session", doc.id, decErr.message);
+        }
+
         sessionsMap.set(doc.id, {
           sessionRef: doc.id,
           ...data,
@@ -73,7 +92,24 @@ const getSessionById = async (req, res) => {
       return res.status(404).json({ error: 'Session not found' });
     }
 
-    return res.json({ session: { sessionRef, ...sessionDoc.data() } });
+    let data = sessionDoc.data();
+    try {
+      if (data.prompt && data.prompt.data) { data.prompt = decryptText(data.prompt, email); }
+      if (data.reply && data.reply.data) { data.reply = decryptText(data.reply, email); }
+
+      if (data.history && Array.isArray(data.history)) {
+        data.history = data.history.map(t => ({
+          ...t,
+          parts: t.parts?.map(p => ({
+            text: p.encryptedPayload ? decryptText(p.encryptedPayload, email) : (p.text || "")
+          }))
+        }));
+      }
+    } catch (decErr) {
+      console.error("Decryption failed for session", sessionDoc.id, decErr.message);
+    }
+
+    return res.json({ session: { sessionRef, ...data } });
   } catch (err) {
     console.error('Error fetching session:', err.message);
     res.status(500).json({ error: 'Failed to fetch session', details: err.message });

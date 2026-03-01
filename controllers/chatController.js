@@ -1,6 +1,7 @@
 const { GoogleGenerativeAI } = require('@google/generative-ai');
 const admin = require('../config/firebase');
 const axios = require('axios');
+const { encryptText } = require('../utils/cryptoUtils');
 const YT_API_KEY = process.env.YT_API_KEY;
 
 // 🔑 Multi-API Key Management
@@ -190,22 +191,41 @@ const chatWithGemini = async (req, res) => {
       { role: 'model', parts: [{ text: reply }], videos: suggestedVideos }
     ];
 
+    // Encrypt history payload so we don't store raw AI transcripts at rest
+    let encryptedHistoryPayload = [];
+    try {
+      // The session map holds the entire turn array. We will just encrypt the stringified turns.
+      // E.g., encrypt the string format and wrap it back in a struct
+      // But since arrayUnion works on structs, let's just encrypt the text parts themselves.
+      encryptedHistoryPayload = newTurns.map(t => ({
+        role: t.role,
+        parts: t.parts.map(p => ({
+          // Encrypt the nested text. Using uid as the secure key.
+          encryptedPayload: encryptText(p.text, email)
+        })),
+        videos: t.videos || []
+      }));
+    } catch (encErr) {
+      console.error('Encryption failed, dropping log to preserve privacy', encErr);
+      encryptedHistoryPayload = null; // Do not risk saving unencrypted
+    }
+
     let finalSessionId = sessionRef;
     const sessionCollection = db.collection('chatbot').doc(email).collection('sessions');
 
     try {
-      if (sessionRef) {
+      if (encryptedHistoryPayload && sessionRef) {
         await sessionCollection.doc(sessionRef).set({
-          history: admin.firestore.FieldValue.arrayUnion(...newTurns),
+          history: admin.firestore.FieldValue.arrayUnion(...encryptedHistoryPayload),
           updatedAt: new Date().toISOString(),
         }, { merge: true });
-      } else {
+      } else if (encryptedHistoryPayload) {
         const now = new Date();
         finalSessionId = now.toISOString().replace(/[:.]/g, '-');
         await sessionCollection.doc(finalSessionId).set({
-          prompt,
-          reply,
-          history: newTurns,
+          prompt: encryptText(prompt, email),
+          reply: encryptText(reply, email),
+          history: encryptedHistoryPayload,
           createdAt: now.toISOString(),
           updatedAt: now.toISOString(),
         });
